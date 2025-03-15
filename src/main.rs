@@ -10,21 +10,20 @@ struct Player;
 struct Ball;
 
 #[derive(Component)]
-struct Numbered(u32);
+struct Numbered(i32);
 
 #[derive(Event)]
 struct MovementAction(i32);
 
-#[derive(Event)]
-struct BallHitEvent {
-    ball_id: Entity,
-    ball_number: u32,
-}
-
 #[derive(Resource)]
 struct BallSpawnTimer(Timer);
 
-const STARTING_NUMBER: u32 = 5;
+#[derive(Component)]
+struct PlayerText;
+
+const STARTING_NUMBER: i32 = 15;
+const SIZE_FACTOR: f32 = 1.5;
+const FONT_SIZE_FACTOR: f32 = SIZE_FACTOR * 0.8;
 
 #[derive(Copy, Clone)]
 enum Bound {
@@ -96,7 +95,7 @@ fn main() {
                 movement,
                 spawn_ball,
                 despawn_out_of_bounds_balls,
-                detect_hits,
+                handle_hits,
             ),
         )
         .run();
@@ -136,17 +135,24 @@ fn setup(
             Player,
             CollidingEntities::default(),
             Numbered(STARTING_NUMBER),
-            Mesh2d(meshes.add(Rectangle::new(30., 30.))),
+            Mesh2d(meshes.add(Rectangle::new(
+                STARTING_NUMBER as f32 * SIZE_FACTOR,
+                STARTING_NUMBER as f32 * SIZE_FACTOR,
+            ))),
             MeshMaterial2d(materials.add(Color::srgb(0., 0., 1.))),
             Transform::from_xyz(200., 0., 0.),
             RigidBody::Dynamic,
-            Collider::rectangle(30., 30.),
+            Collider::rectangle(
+                STARTING_NUMBER as f32 * SIZE_FACTOR,
+                STARTING_NUMBER as f32 * SIZE_FACTOR,
+            ),
         ))
         .with_children(|builder| {
             builder.spawn((
+                PlayerText,
                 Text2d::new(STARTING_NUMBER.to_string()),
                 TextFont {
-                    font_size: 20.,
+                    font_size: STARTING_NUMBER as f32 * FONT_SIZE_FACTOR,
                     ..default()
                 },
             ));
@@ -189,7 +195,7 @@ fn spawn_ball(
         return;
     }
     let mut rng = rand::rng();
-    let number = rng.random_range((1 as u32)..30);
+    let number = rng.random_range((1 as i32)..30);
 
     let bound = Bound::random();
     let starting_point = random_point_on_bound(bound);
@@ -200,32 +206,58 @@ fn spawn_ball(
         .spawn((
             Numbered(number),
             Ball,
-            Mesh2d(meshes.add(Circle::new(number as f32))),
+            Mesh2d(meshes.add(Circle::new(number as f32 * SIZE_FACTOR / 2.))),
             MeshMaterial2d(materials.add(Color::srgb(1., 0., 0.))),
             Transform::from_translation(starting_point.extend(0.)),
             RigidBody::Kinematic,
             LinearVelocity(movement_direction * 100.),
-            Collider::circle(number as f32),
+            Collider::circle(number as f32 * SIZE_FACTOR / 2.),
         ))
         .with_children(|builder| {
             builder.spawn((
                 Text2d::new(number.to_string()),
                 TextFont {
-                    font_size: number as f32,
+                    font_size: number as f32 * FONT_SIZE_FACTOR / 2.,
                     ..default()
                 },
             ));
         });
 }
 
-fn detect_hits(
-    player_hits: Query<&CollidingEntities, With<Player>>,
-    ball_query: Query<&Numbered, With<Ball>>,
+fn handle_hits(
+    mut player_query: Query<
+        (
+            &CollidingEntities,
+            &mut Numbered,
+            &mut Collider,
+            &mut Mesh2d,
+        ),
+        With<Player>,
+    >,
+    mut text_query: Query<(&mut Text2d, &mut TextFont), With<PlayerText>>,
+    ball_query: Query<&Numbered, (With<Ball>, Without<Player>)>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    for hits in player_hits.iter() {
+    for (hits, mut player_number, mut player_collider, mut player_mesh) in player_query.iter_mut() {
         for hit_entity in hits.iter() {
             if let Ok(Numbered(ball_number)) = ball_query.get(*hit_entity) {
-                println!("hit - {ball_number}");
+                let num = if *ball_number > player_number.0 {
+                    &(-player_number.0 + 1)
+                } else {
+                    ball_number
+                };
+
+                commands.entity(*hit_entity).despawn_recursive();
+                player_number.0 += *num;
+
+                let new_size = player_number.0 as f32 * SIZE_FACTOR;
+                player_mesh.0 = meshes.add(Rectangle::new(new_size, new_size));
+                *player_collider = Collider::rectangle(new_size, new_size);
+
+                let (mut child_text, mut child_text_font) = text_query.single_mut();
+                child_text.0 = player_number.0.to_string();
+                child_text_font.font_size = player_number.0 as f32 * FONT_SIZE_FACTOR;
             }
         }
     }
