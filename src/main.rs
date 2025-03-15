@@ -129,6 +129,7 @@ fn main() {
         .insert_resource(ClearColor(BACKGROUND_COLOR))
         .insert_resource(WallBounceStopwatch(Stopwatch::new()))
         .add_event::<MovementAction>()
+        .add_systems(Startup, set_camera)
         .add_systems(OnEnter(GameState::InGame), setup_game)
         .add_systems(OnExit(GameState::InGame), handle_game_over)
         .add_systems(OnEnter(GameState::DeathScreen), setup_death_screen)
@@ -150,13 +151,15 @@ fn main() {
         .run();
 }
 
+fn set_camera(mut commands: Commands) {
+    commands.spawn(Camera2d);
+}
+
 fn setup_game(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn(Camera2d);
-
     let walls = [
         ((1880., 20.), (0., Bound::UpperBound.value())),
         ((1880., 20.), (0., Bound::LowerBound.value())),
@@ -240,7 +243,10 @@ fn handle_game_over(
     let Numbered(player_score) = player_score_query.single();
     current_score.0 = *player_score;
 
-    commands.spawn(AudioPlayer::new(asset_server.load("sounds/game_over.ogg")));
+    commands.spawn((
+        AudioPlayer::new(asset_server.load("sounds/game_over.ogg")),
+        InGameEntity,
+    ));
     for entity in in_game_entities.iter() {
         commands.entity(entity).despawn_recursive();
     }
@@ -260,21 +266,6 @@ fn setup_death_screen(
     current_score: ResMut<CurrentScore>,
     mut high_score: ResMut<HighScore>,
 ) {
-    commands.spawn((
-        Text::new("Game over"),
-        TextFont {
-            font_size: 100.,
-            ..default()
-        },
-        DeathScreenEntity,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(300.),
-            left: Val::Px(500.),
-            ..default()
-        },
-    ));
-
     let high_score_text = if current_score.0 > high_score.0 {
         high_score.0 = current_score.0;
         "new high score!".to_string()
@@ -283,23 +274,35 @@ fn setup_death_screen(
     };
 
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            DeathScreenEntity,
+        ))
         .with_children(|builder| {
             builder
                 .spawn((
                     Node {
-                        flex_direction: FlexDirection::Row,
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
                         ..default()
                     },
                     DeathScreenEntity,
                 ))
                 .with_children(|builder| {
+                    builder.spawn((
+                        Text::new("Game over"),
+                        TextFont {
+                            font_size: 100.,
+                            ..default()
+                        },
+                        DeathScreenEntity,
+                    ));
                     builder.spawn((
                         Text::new(format!("score - {}", current_score.0)),
                         TextFont {
@@ -441,13 +444,18 @@ fn handle_hits(
                 let (mut child_text, mut child_text_font) = text_query.single_mut();
                 child_text.0 = player_number.0.to_string();
                 child_text_font.font_size = player_number.0 as f32 * FONT_SIZE_FACTOR;
-                commands.spawn(AudioPlayer::new(asset_server.load("sounds/ball_eaten.ogg")));
+                commands.spawn((
+                    AudioPlayer::new(asset_server.load("sounds/ball_eaten.ogg")),
+                    InGameEntity,
+                ));
             } else if let Ok(_) = wall_query.get(*hit_entity) {
-                if player_velocity.y.abs() > 20. && wall_bounce_stopwatch.0.elapsed_secs_f64() > 0.1
+                if player_velocity.length() > 30.
+                    && wall_bounce_stopwatch.0.elapsed_secs_f64() > 0.1
                 {
                     wall_bounce_stopwatch.0.reset();
-                    commands.spawn(AudioPlayer::new(
-                        asset_server.load("sounds/wall_bounce.ogg"),
+                    commands.spawn((
+                        AudioPlayer::new(asset_server.load("sounds/wall_bounce.ogg")),
+                        InGameEntity,
                     ));
                 }
             }
