@@ -1,5 +1,5 @@
 use avian2d::prelude::*;
-use bevy::{prelude::*, window::WindowMode};
+use bevy::{prelude::*, time::Stopwatch, window::WindowMode};
 use rand::prelude::*;
 use std::mem::discriminant;
 
@@ -10,6 +10,9 @@ struct Player;
 struct Ball;
 
 #[derive(Component)]
+struct Wall;
+
+#[derive(Component)]
 struct Numbered(i32);
 
 #[derive(Event)]
@@ -18,12 +21,17 @@ struct MovementAction(i32);
 #[derive(Resource)]
 struct BallSpawnTimer(Timer);
 
+#[derive(Resource)]
+struct WallBounceStopwatch(Stopwatch);
+
 #[derive(Component)]
 struct PlayerText;
 
 const STARTING_NUMBER: i32 = 15;
 const SIZE_FACTOR: f32 = 1.5;
 const FONT_SIZE_FACTOR: f32 = SIZE_FACTOR * 0.8;
+
+const BACKGROUND_COLOR: Color = Color::srgb(0.2, 0.2, 0.2);
 
 #[derive(Copy, Clone)]
 enum Bound {
@@ -43,8 +51,8 @@ impl Bound {
 
     fn value(&self) -> f32 {
         match self {
-            Bound::UpperBound => -500.,
-            Bound::LowerBound => 500.,
+            Bound::UpperBound => 500.,
+            Bound::LowerBound => -500.,
             Bound::LeftBound => -940.,
             Bound::RightBound => 940.,
         }
@@ -85,11 +93,14 @@ fn main() {
             0.5,
             TimerMode::Repeating,
         )))
+        .insert_resource(ClearColor(BACKGROUND_COLOR))
+        .insert_resource(WallBounceStopwatch(Stopwatch::new()))
         .add_event::<MovementAction>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
+                tick_stopwatch,
                 keyboard_input,
                 change_gravity,
                 movement,
@@ -118,6 +129,7 @@ fn setup(
 
     for (size, transform) in walls {
         commands.spawn((
+            Wall,
             Sprite {
                 color: Color::srgb(0.0, 0.4, 0.7),
                 custom_size: Some(Vec2::new(size.0, size.1)),
@@ -126,7 +138,25 @@ fn setup(
             Transform::from_xyz(transform.0, transform.1, 100.),
             RigidBody::Static,
             Collider::rectangle(size.0, size.1),
-            Restitution::PERFECTLY_INELASTIC,
+            Restitution::PERFECTLY_ELASTIC,
+        ));
+    }
+
+    let covers = [
+        ((10_000., 200.), (0., Bound::UpperBound.value() + 110.)),
+        ((10_000., 200.), (0., Bound::LowerBound.value() - 110.)),
+        ((200., 10_000.), (Bound::LeftBound.value() - 110., 0.)),
+        ((200., 10_000.), (Bound::RightBound.value() + 110., 0.)),
+    ];
+
+    for (size, transform) in covers {
+        commands.spawn((
+            Sprite {
+                color: BACKGROUND_COLOR,
+                custom_size: Some(Vec2::new(size.0, size.1)),
+                ..default()
+            },
+            Transform::from_xyz(transform.0, transform.1, 99.),
         ));
     }
 
@@ -142,6 +172,7 @@ fn setup(
             MeshMaterial2d(materials.add(Color::srgb(0., 0., 1.))),
             Transform::from_xyz(200., 0., 0.),
             RigidBody::Dynamic,
+            Restitution::new(0.9),
             Collider::rectangle(
                 STARTING_NUMBER as f32 * SIZE_FACTOR,
                 STARTING_NUMBER as f32 * SIZE_FACTOR,
@@ -157,6 +188,10 @@ fn setup(
                 },
             ));
         });
+}
+
+fn tick_stopwatch(mut stopwatch: ResMut<WallBounceStopwatch>, time: Res<Time>) {
+    stopwatch.0.tick(time.delta());
 }
 
 fn keyboard_input(
@@ -195,7 +230,7 @@ fn spawn_ball(
         return;
     }
     let mut rng = rand::rng();
-    let number = rng.random_range((1 as i32)..30);
+    let number = rng.random_range((1 as i32)..100);
 
     let bound = Bound::random();
     let starting_point = random_point_on_bound(bound);
@@ -227,6 +262,7 @@ fn spawn_ball(
 fn handle_hits(
     mut player_query: Query<
         (
+            &LinearVelocity,
             &CollidingEntities,
             &mut Numbered,
             &mut Collider,
@@ -236,20 +272,26 @@ fn handle_hits(
     >,
     mut text_query: Query<(&mut Text2d, &mut TextFont), With<PlayerText>>,
     ball_query: Query<&Numbered, (With<Ball>, Without<Player>)>,
+    wall_query: Query<&Wall>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
+    mut wall_bounce_stopwatch: ResMut<WallBounceStopwatch>,
 ) {
-    for (hits, mut player_number, mut player_collider, mut player_mesh) in player_query.iter_mut() {
+    for (player_velocity, hits, mut player_number, mut player_collider, mut player_mesh) in
+        player_query.iter_mut()
+    {
         for hit_entity in hits.iter() {
             if let Ok(Numbered(ball_number)) = ball_query.get(*hit_entity) {
-                let num = if *ball_number > player_number.0 {
-                    &(-player_number.0 + 1)
+                let player_number_change = if *ball_number > player_number.0 {
+                    -player_number.0 + 1
                 } else {
-                    ball_number
+                    commands.spawn(AudioPlayer::new(asset_server.load("sounds/ball_eaten.ogg")));
+                    (*ball_number as f32 / 5.).ceil() as i32
                 };
 
                 commands.entity(*hit_entity).despawn_recursive();
-                player_number.0 += *num;
+                player_number.0 += player_number_change;
 
                 let new_size = player_number.0 as f32 * SIZE_FACTOR;
                 player_mesh.0 = meshes.add(Rectangle::new(new_size, new_size));
@@ -258,6 +300,15 @@ fn handle_hits(
                 let (mut child_text, mut child_text_font) = text_query.single_mut();
                 child_text.0 = player_number.0.to_string();
                 child_text_font.font_size = player_number.0 as f32 * FONT_SIZE_FACTOR;
+            } else if let Ok(_) = wall_query.get(*hit_entity) {
+                if player_velocity.length() > 50.
+                    && wall_bounce_stopwatch.0.elapsed_secs_f64() > 0.5
+                {
+                    wall_bounce_stopwatch.0.reset();
+                    commands.spawn(AudioPlayer::new(
+                        asset_server.load("sounds/wall_bounce.ogg"),
+                    ));
+                }
             }
         }
     }
@@ -290,7 +341,7 @@ fn random_point_on_bound(bound: Bound) -> Vec2 {
         ),
         Bound::RightBound | Bound::LeftBound => Vec2::new(
             bound.value(),
-            rng.random_range(Bound::UpperBound.value()..Bound::LowerBound.value()),
+            rng.random_range(Bound::LowerBound.value()..Bound::UpperBound.value()),
         ),
     }
 }
@@ -298,6 +349,6 @@ fn random_point_on_bound(bound: Bound) -> Vec2 {
 fn is_out_of_bounds(point: Vec2) -> bool {
     return point.x < Bound::LeftBound.value()
         || point.x > Bound::RightBound.value()
-        || point.y < Bound::UpperBound.value()
-        || point.y > Bound::LowerBound.value();
+        || point.y > Bound::UpperBound.value()
+        || point.y < Bound::LowerBound.value();
 }
